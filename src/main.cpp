@@ -214,7 +214,7 @@ void setup() {
     // SD logging
     // Docs: https://docs.arduino.cc/learn/programming/sd-guide/
     Serial.print("Initializing SD card...");
-    if (!SD.begin(D32)) {
+    if (!SD.begin()) {
         showErrorLed = true;
         errorMsg += "SD init failed\n";
     }
@@ -416,8 +416,7 @@ void loop() {
 
         dataFile.println("");
         dataFile.flush();
-    }
-    else{
+        } else {
         Serial.println("Error writing to file");
     }
 
