@@ -6,6 +6,7 @@
 #include <SensirionI2cScd4x.h>
 #include <Wire.h>
 #include <STM32SD.h>
+#include <Adafruit_GPS.h>
 #include <Adafruit_BNO055.h>
 #include <Adafruit_GPS.h>
 #include <ISM330DLCSensor.h>
@@ -24,6 +25,7 @@ int floatBuffer[2];
 
 // GPS
 Adafruit_GPS GPS(&Wire);
+char c;
 
 // BNO055
 Adafruit_BNO055 bno;
@@ -120,6 +122,17 @@ void toCharArray(int32_t in) {
 void setup() {
     Serial.begin(9600);
     Serial.setTimeout(0);
+    Wire.begin();
+
+    // GPS
+    while (!GPS.begin(0x10)) {
+        showErrorLed = true;
+        errorMsg += "There was a problem detecting the GPS\n";
+    }
+    delay(1000);
+    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ); // 1 Hz update rate
+
 
     // SCD 41
     Wire.begin();
@@ -210,7 +223,7 @@ void setup() {
 
     // Telemetry header
     Serial.print("Millis, ");
-    Serial.print("Time, Fix, Quality, Latitude_Degrees, Longitute_Degrees, Speed, Angle, Altitude, Sats, Magnetic_Variation, "); //GPS Header
+    Serial.print("Time, Fix, Quality, Latitude_Degrees, Longitute_Degrees, Speed, Angle, Altitude, Sats, "); //GPS Header
     Serial.print("Linear_Accel_X, Linear_Accel_Y, Linear_Accel_Z, "); // BNO055 Header
     Serial.print("ISM_330DLC_Accel_X, ISM_330DLC_Accel_Y, ISM_330DLC_Accel_Z, "); // ISM 330DLC Header
     Serial.print("CO2_Concentration, SCD41_Temperature, Relative_Humidity, "); // SCD41 Header
@@ -232,8 +245,12 @@ void loop() {
         toCharArray((long)millis()); dataFile.print(buffer); dataFile.print(", "); // Millis
 
         // GPS data
-        if(GPS.newNMEAreceived()){
-            GPS.parse(GPS.lastNMEA());
+        if(GPS.available()){
+           c = GPS.read();
+            if (GPS.newNMEAreceived()) {
+                if (!GPS.parse(GPS.lastNMEA())) {
+                }
+            }
         }
 
         toCharArray(GPS.year); dataFile.print(buffer); dataFile.print("-"); // Year
@@ -359,15 +376,14 @@ void loop() {
     Serial.print((int)GPS.fix); Serial.print(", ");
     Serial.print((int)GPS.fixquality); Serial.print(", ");
     if(GPS.fix){
-        Serial.print(GPS.latitudeDegrees); Serial.print(GPS.lat); Serial.print(", ");
-        Serial.print(GPS.longitudeDegrees); Serial.print(GPS.lon); Serial.print(", ");
+        Serial.print(GPS.latitudeDegrees, 6); Serial.print(GPS.lat); Serial.print(", ");
+        Serial.print(GPS.longitudeDegrees, 6); Serial.print(GPS.lon); Serial.print(", ");
         Serial.print(GPS.speed); Serial.print(", ");
         Serial.print(GPS.angle); Serial.print(", ");
         Serial.print(GPS.altitude); Serial.print(", ");
         Serial.print((int)GPS.satellites); Serial.print(", ");
-        Serial.print(GPS.magvariation); Serial.print(", ");
     } else {
-        Serial.print(",,,,,,,");
+        Serial.print(",,,,,,");
     }
 
     // BNO055
