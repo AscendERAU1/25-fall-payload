@@ -3,16 +3,17 @@
 // ------- //
 
 #include <Arduino.h>
-#include <SensirionI2cScd4x.h>
 #include <Wire.h>
 #include <STM32SD.h>
 #include <Adafruit_GPS.h>
 #include <Adafruit_BNO055.h>
-#include <Adafruit_GPS.h>
-#include <ISM330DLCSensor.h>
+#include <Adafruit_ISM330DHCX.h>
+#include <SensirionI2cScd4x.h>
 #include <Adafruit_AS7341.h>
-#include <Adafruit_NeoPixel.h>
 #include <Adafruit_BMP3XX.h>
+#include <Adafruit_LTR390.h>
+#include <Adafruit_BME680.h>
+#include <Adafruit_NeoPixel.h>
 
 // ---- //
 /* Vars */
@@ -33,8 +34,8 @@ sensors_event_t orientationData, angVelocityData, linearAccelData, magnetometerD
 float x, y, z; // Variables to store the x, y, z values of the sensor data
 
 // ISM 330DLC
-int32_t accelerometer[3];
-int32_t gyroscope[3];
+Adafruit_ISM330DHCX ism330;
+sensors_event_t ismTemperatureData, ismAccelerometerData, ismGyroData;
 
 // SCD41
 SensirionI2cScd4x scd41;
@@ -48,6 +49,18 @@ Adafruit_AS7341 as7341;
 
 // BPM390
 Adafruit_BMP3XX baro;
+const float seaLevelPressure = 1013.25;
+
+// LTR390
+Adafruit_LTR390 ltr390;
+uint32_t als, uvs;
+static unsigned long lastMillis = 0;
+const unsigned long interval = 30000;
+unsigned long currentMillis;
+bool readingUV = false;
+
+// BME688
+Adafruit_BME680 bme688;
 const float seaLevelPressure = 1013.25;
 
 // LED
@@ -70,6 +83,7 @@ void toCharArray(float in);
 void toCharArray(bool in);
 void toCharArray(uint8_t in);
 void toCharArray(uint16_t in);
+void toCharArray(uint32_t in);
 void toCharArray(int8_t in);
 void toCharArray(int32_t in);
 
@@ -108,6 +122,9 @@ void toCharArray(uint8_t in) {
 void toCharArray(uint16_t in) {
     sprintf(buffer, "%i", in);
 }
+void toCharArray(uint32_t in) {
+    sprintf(buffer, "%i", in);
+}
 void toCharArray(int8_t in) {
     sprintf(buffer, "%i", in);
 }
@@ -133,43 +150,33 @@ void setup() {
     GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
     GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ); // 1 Hz update rate
 
+    // BNO055
+    if (!bno.begin()) {
+        showErrorLed = true;
+        errorMsg += "There was a problem detecting the BNO055 sensor\n";
+    }
+
+    // ISM330DLC
+    if (!ism330.begin_I2C()) {
+        showErrorLed = true;
+        errorMsg += "There was a problem detecting the ISM330DLC sensor\n";
+    }
+    ism330.configInt1(false, false, true);
+    ism330.configInt2(false, true, false);
 
     // SCD 41
-    Wire.begin();
     scd41.begin(Wire, SCD41_I2C_ADDR_62);
     int scd41good = scd41.wakeUp();
     if (scd41good != 0) {
         showErrorLed = true;
-        errorMsg += "Error waking up the SCD41 sensor\n";
+        errorMsg += "There was a problem detecting the SCD41 sensor\n";
     }
     scd41.startPeriodicMeasurement();
-
-    // ISM330DLC_ACC_GYRO
-    ISM330DLCSensor AccGyr(&Wire);
-    AccGyr.begin();
-    AccGyr.Enable_X();
-    AccGyr.Enable_G();
-
-    // GPS
-    GPS.begin(0x10);
-    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
-    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ); // 1 Hz update rate
-    GPS.sendCommand(PGCMD_ANTENNA); // Request updates on antenna status, comment out to keep quiet
-
-    delay(1000);
-
-    GPS.println(PMTK_Q_RELEASE); // Ask for firmware version
-
-    // BNO055
-    if (!bno.begin()) {
-        showErrorLed = true;
-        errorMsg += "There was a problem detecting the BNO055\n";
-    }
 
     // AS7341
     if (!as7341.begin()) {
         showErrorLed = true;
-        errorMsg += "Could not find AS7341\n";
+        errorMsg += "There was a problem detecting the AS7341 sensor\n";
     }
 
     as7341.setATIME(100);
@@ -177,11 +184,32 @@ void setup() {
     as7341.setGain(AS7341_GAIN_256X);
 
     // BMP390
-    baro.begin_I2C();
+    if (!baro.begin_I2C()) {
+        showErrorLed = true;
+        errorMsg += "There was a problem detecting the BMP390 sensor\n";
+    }
+
     baro.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
     baro.setPressureOversampling(BMP3_OVERSAMPLING_8X);
     baro.setIIRFilterCoeff(BMP3_IIR_FILTER_DISABLE);
     baro.setOutputDataRate(BMP3_ODR_100_HZ);
+
+    // LTR390
+    if (!ltr390.begin()) {
+        showErrorLed = true;
+        errorMsg += "There was a problem detecting the LTR390 sensor\n";
+    }
+    ltr390.enable(true);
+    ltr390.setGain(LTR390_GAIN_18);
+    ltr390.setResolution(LTR390_RESOLUTION_20BIT);
+    ltr390.setMode(LTR390_MODE_ALS);
+    lastMillis = millis();
+
+    // BME688
+    if (!bme688.begin()) {
+        showErrorLed = true;
+        errorMsg += "There was a problem detecting the BME688 sensor\n";
+    }
 
     // SD logging
     // Docs: https://docs.arduino.cc/learn/programming/sd-guide/
@@ -210,10 +238,12 @@ void setup() {
         dataFile.print("Millis,");
         dataFile.print("Time, Fix, Quality, Latitude_Degrees, Longitute_Degrees, Speed, Angle, Altitude, Sats, Magnetic_Variation, HDOP, VDOP, PDOP, "); //GPS Header
         dataFile.print("BNO055_Temperature, Orientation_X, Orientation_Y, Orientation_Z, BNO055_Gyro_X, BNO055_Gyro_Y, BNO055_Gyro_Z, Linear_Accel_X, Linear_Accel_Y, Linear_Accel_Z, Mag_X, Mag_Y, Mag_Z, BNO055_Accel_X, BNO055_Accel_Y, BNO055_Accel_Z,  Accel_Gravity_X, Accel_Gravity_Y, Accel_Gravity_Z, "); // BNO055 Header
-        dataFile.print("ISM330DLC_Accel_X, ISM330DLC_Accel_Y, ISM330DLC_Accel_Z, ISM330DLC_Gyro_X, ISM330DLC_Gyro_Y, ISM330DLC_Gyro_Z, "); // ISM 330DLC Header
+        dataFile.print("ISM330DLC_Temperature, ISM330DLC_Accel_X, ISM330DLC_Accel_Y, ISM330DLC_Accel_Z, ISM330DLC_Gyro_X, ISM330DLC_Gyro_Y, ISM330DLC_Gyro_Z, "); // ISM 330DLC Header
         dataFile.print("CO2_Concentration, SCD41_Temperature, Relative_Humidity, "); // SCD41 Header
         dataFile.print("415nm, 445nm, 480nm, 515nm, 555nm, 590nm, 630nm, 680nm, Clear, NIR, "); // AS7341 Header
-        dataFile.println("Altitude, Pressure, BMP390_Temperature"); // BMP390 Header
+        dataFile.print("BMP390_Altitude, BMP390_Pressure, BMP390_Temperature, "); // BMP390 Header
+        dataFile.print("UV Light, Ambient Light, "); // LTR390 Header
+        dataFile.println("BME688_Temperature, BME688_Pressure, BME688_Humidity, BME688_Gas_Resistance, BME688_Altitude"); // BME688 Header
 
         Serial.println("File setup complete.");
     } else{
@@ -313,17 +343,17 @@ void loop() {
         toCharArray(gravityData.acceleration.z); dataFile.print(buffer); dataFile.print(", "); // Accel_Gravity_Z
 
         // ISM330DLC Data
-        ISM330DLCSensor AccGyr(&Wire);
-        AccGyr.Get_X_Axes(accelerometer);
-        AccGyr.Get_G_Axes(gyroscope);
+        ism330.getEvent(&ismAccelerometerData, &ismGyroData, &ismTemperatureData);
 
-        toCharArray(accelerometer[0]); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Accel_X
-        toCharArray(accelerometer[1]); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Accel_Y
-        toCharArray(accelerometer[2]); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Accel_Z
+        toCharArray(ismTemperatureData.temperature); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Temperature
 
-        toCharArray(gyroscope[0]); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Gyro_X
-        toCharArray(gyroscope[1]); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Gyro_Y
-        toCharArray(gyroscope[2]); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Gyro_Z
+        toCharArray(ismAccelerometerData.acceleration.x); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Accel_X
+        toCharArray(ismAccelerometerData.acceleration.y); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Accel_Y
+        toCharArray(ismAccelerometerData.acceleration.z); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Accel_Z
+
+        toCharArray(ismGyroData.gyro.x); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Gyro_X
+        toCharArray(ismGyroData.gyro.y); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Gyro_Y
+        toCharArray(ismGyroData.gyro.z); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Gyro_Z
 
         // SCD41 Data
         scd41data = scd41.readMeasurement(co2Concentration, temperature, relativeHumidity);
@@ -348,9 +378,41 @@ void loop() {
         toCharArray(as7341.getChannel(AS7341_CHANNEL_NIR)); dataFile.print(buffer); dataFile.print(", "); // NIR
 
         // BMP390 Data
-        toCharArray(baro.readAltitude(seaLevelPressure)); dataFile.print(buffer); dataFile.print(", "); // Altitude
-        toCharArray(baro.readPressure()); dataFile.print(buffer); dataFile.print(", "); // Pressure
-        toCharArray(baro.readTemperature()); dataFile.print(buffer); // BMP390_Temperature
+        toCharArray(baro.readAltitude(seaLevelPressure)); dataFile.print(buffer); dataFile.print(", "); // BMP390_Altitude
+        toCharArray(baro.readPressure()); dataFile.print(buffer); dataFile.print(", "); // BMP390_Pressure
+        toCharArray(baro.readTemperature()); dataFile.print(buffer); dataFile.print(", "); // BMP390_Temperature
+
+        // LTR390 Data
+        currentMillis = millis();
+        if (currentMillis - lastMillis >= interval) {
+            readingUV = !readingUV;
+            if (readingUV) {
+                ltr390.setMode(LTR390_MODE_UVS);
+            } else {
+                ltr390.setMode(LTR390_MODE_ALS);
+            }
+            lastMillis = currentMillis;
+        }
+
+        if (readingUV) {
+            uvs = ltr390.readUVS();
+            als = 0;
+        } else {
+            als = ltr390.readALS();
+            uvs = 0;
+        }
+
+        toCharArray(uvs); dataFile.print(buffer); dataFile.print(", "); // UV Light
+        toCharArray(als); dataFile.print(buffer); // Ambient Light
+
+        // BME688 Data
+        bme688.performReading();
+        toCharArray(bme688.readTemperature()); dataFile.print(buffer); dataFile.print(", "); // BME688_Temperature
+        toCharArray(bme688.readPressure() / 100.0F); dataFile.print(buffer); dataFile.print(", "); // BME688_Pressure
+        toCharArray(bme688.readHumidity()); dataFile.print(buffer); dataFile.print(", "); // BME688_Humidity
+        toCharArray(bme688.gas_resistance / 1000.0F); dataFile.print(buffer); dataFile.print(", "); // BME688_Gas_Resistances
+        toCharArray(bme688.readAltitude(seaLevelPressure)); dataFile.print(buffer); dataFile.print(", "); // BME688_Altitude
+
 
         dataFile.println("");
         dataFile.flush();
@@ -387,22 +449,18 @@ void loop() {
     }
 
     // BNO055
-    bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL);
-
     Serial.print(linearAccelData.acceleration.x); Serial.print(", ");
     Serial.print(linearAccelData.acceleration.y); Serial.print(", ");
     Serial.print(linearAccelData.acceleration.z); Serial.print(", ");
 
     // ISM 330DLC
-    ISM330DLCSensor AccGyr(&Wire);
-    AccGyr.Get_X_Axes(accelerometer);
-
-    Serial.print(accelerometer[0]); Serial.print(", ");
-    Serial.print(accelerometer[1]); Serial.print(", ");
-    Serial.print(accelerometer[2]); Serial.print(", ");
+    ism330.getEvent(&ismAccelerometerData, &ismGyroData, &ismTemperatureData);
+    Serial.print(ismAccelerometerData.acceleration.x); Serial.print(", ");
+    Serial.print(ismAccelerometerData.acceleration.y); Serial.print(", ");
+    Serial.print(ismAccelerometerData.acceleration.z); Serial.print(", ");
 
     // SCD41
-    scd41data = scd41.readMeasurement(co2Concentration, temperature, relativeHumidity);
+    scd41.readMeasurement(co2Concentration, temperature, relativeHumidity);
 
     Serial.print(co2Concentration); Serial.print(", ");
     Serial.print(temperature); Serial.print(", ");
@@ -410,7 +468,11 @@ void loop() {
     // BMP390
     Serial.print(baro.readAltitude(seaLevelPressure)); Serial.print(", ");
     Serial.print(baro.readPressure()); Serial.print(", ");
-    Serial.print(baro.readTemperature());
+    Serial.print(baro.readTemperature()); Serial.print(", ");
+
+    // LTR390
+    Serial.print(uvs); Serial.print(", ");
+    Serial.print(als);
 
     Serial.println();
 
@@ -433,6 +495,4 @@ void loop() {
 
     led.show();
     ledCurrentlyShowing = !ledCurrentlyShowing;
-
-    delay(500);
 }
