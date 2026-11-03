@@ -61,7 +61,6 @@ bool readingUV = false;
 
 // BME688
 Adafruit_BME680 bme688;
-const float seaLevelPressure = 1013.25;
 
 // LED
 Adafruit_NeoPixel led(1, 8, NEO_RGB); // NeoPixel LED. Remember to use .show() to actually update the LED
@@ -203,7 +202,7 @@ void setup() {
     as7341.setGain(AS7341_GAIN_256X);
 
     // BMP390
-    if (!baro.begin_I2C()) {
+    if (!baro.begin_I2C(0x76)) {
         showErrorLed = true;
         errorMsg += "There was a problem detecting the BMP390 sensor\n";
     }
