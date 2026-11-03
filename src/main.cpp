@@ -73,6 +73,8 @@ String errorMsg = ""; // Debug message for why there is an error
 /* Function Declarations */
 // --------------------- //
 
+void updateGPS();
+
 void splitFloat(int buffer[], float in);
 
 void toCharArray(String in);
@@ -90,6 +92,16 @@ void toCharArray(int32_t in);
 // -------------------- //
 /* Function Definitions */
 // -------------------- //
+
+void updateGPS() {
+    for (int i = 0; i < 64; i++) {
+        GPS.read();
+
+        if (GPS.newNMEAreceived()) {
+            GPS.parse(GPS.lastNMEA());
+        }
+    }
+}
 
 void splitFloat(int buffer[], float in) {
     buffer[0] = in;
@@ -142,9 +154,16 @@ void setup() {
     Wire.begin();
 
     // GPS
-    while (!GPS.begin(0x10)) {
+    // while (!GPS.begin(0x10)) {
+    //     showErrorLed = true;
+    //     errorMsg += "There was a problem detecting the GPS\n";
+    // }
+    if (!GPS.begin(0x10)) {
         showErrorLed = true;
         errorMsg += "There was a problem detecting the GPS\n";
+        Serial.println("ERROR: GPS not detected!");
+    } else {
+        Serial.println("GPS initialized successfully.");
     }
     delay(1000);
     GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
@@ -270,18 +289,19 @@ void loop() {
     // ------------ //
     /* Data Logging */
     // ------------ //
+    updateGPS(); 
 
     if(dataFile){
         toCharArray((long)millis()); dataFile.print(buffer); dataFile.print(", "); // Millis
 
         // GPS data
-        if(GPS.available()){
-           c = GPS.read();
-            if (GPS.newNMEAreceived()) {
-                if (!GPS.parse(GPS.lastNMEA())) {
-                }
-            }
-        }
+        // if(GPS.available()){
+        //    c = GPS.read();
+        //     if (GPS.newNMEAreceived()) {
+        //         if (!GPS.parse(GPS.lastNMEA())) {
+        //         }
+        //     }
+        // }a
 
         toCharArray(GPS.year); dataFile.print(buffer); dataFile.print("-"); // Year
         toCharArray(GPS.month); dataFile.print(buffer); dataFile.print("-"); // Month
@@ -494,4 +514,5 @@ void loop() {
 
     led.show();
     ledCurrentlyShowing = !ledCurrentlyShowing;
+    updateGPS();
 }
