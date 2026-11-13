@@ -199,11 +199,11 @@ void sendGpsPacket() {
 
     // IMPORTANT TO KEEP SPACES (ground station parses on them)
     LoRa.beginPacket();
-    LoRa.print("GPS Packet: lt");
+    LoRa.print("GPS Packet: lt ");
     LoRa.print(GPS.latitudeDegrees, 6);
-    LoRa.print(" ln");
+    LoRa.print(" ln ");
     LoRa.print(GPS.longitudeDegrees, 6);
-    LoRa.print(" Alt");
+    LoRa.print(" Alt ");
     LoRa.print(GPS.altitude, 1);
     LoRa.endPacket();
 }
