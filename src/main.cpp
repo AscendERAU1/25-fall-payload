@@ -1,3 +1,21 @@
+// main.cpp
+// 
+// Used for ASCEND! sensors team on the balloon payload containing sensors and a downlink with data and gps to a ground station
+// 
+// Currently has:
+// BNO055 (Accelerometer)
+// ISM3330DLC (Accelerometer, Temp, Gryoscope)
+// SCD41 (C02 detector, Temp, Humidity)
+// BMP390 (Temp, Pressure, Altitude)
+// LTR390 (UV, Ambient Light)
+// AS7341 (Light Wavelength Detector)
+// Adafruit GPS (GPS)
+//
+// Ground Station (GS) Addition:
+// Transceiver: Transmits GPS, Data packets
+// Currently set to 909 MHZ
+//
+
 // ------- //
 /* Imports */
 // ------- //
@@ -14,6 +32,10 @@
 #include <Adafruit_LTR390.h>
 #include <Adafruit_BME680.h>
 #include <Adafruit_NeoPixel.h>
+
+// Transceiver (GS ADDITION)
+#include <SPI.h>
+#include <LoRa.h>
 
 // ---- //
 /* Vars */
@@ -67,6 +89,17 @@ Adafruit_NeoPixel led(1, 8, NEO_RGB); // NeoPixel LED. Remember to use .show() t
 bool ledCurrentlyShowing = false; // If the LED is currently showing. Used to blink the LED
 bool showErrorLed = false; // If the LED should show there is an error
 String errorMsg = ""; // Debug message for why there is an error
+
+// Transceiver 
+#define ss 10
+#define rst 5
+#define dio0 2
+
+// LoRa TX timing 
+const unsigned long GPS_TX_INTERVAL  = 10000;  // 10 s
+const unsigned long DATA_TX_INTERVAL = 60000;  // 60 s
+unsigned long lastGpsTx  = 0;
+unsigned long lastDataTx = 5000; // 5s delay to help gps and data not interfere
 
 // --------------------- //
 /* Function Declarations */
@@ -142,6 +175,82 @@ void toCharArray(int8_t in) {
 void toCharArray(int32_t in) {
     sprintf(buffer, "%i", in);
 }
+
+
+// Transciver Functions
+
+// Appends ",tag:value" to the packet being built
+void addF(const char* tag, float v, uint8_t digits = 2) {
+    LoRa.print(','); LoRa.print(tag); LoRa.print(':'); LoRa.print(v, digits);
+}
+void addI(const char* tag, long v) {
+    LoRa.print(','); LoRa.print(tag); LoRa.print(':'); LoRa.print(v);
+}
+
+// Sends GPS packets 
+void sendGpsPacket() {
+
+    // IMPORTANT TO KEEP SPACES (ground station parses on them)
+    LoRa.beginPacket();
+    LoRa.print("GPS Packet: lt");
+    LoRa.print(GPS.latitudeDegrees, 6);
+    LoRa.print(" ln");
+    LoRa.print(GPS.longitudeDegrees, 6);
+    LoRa.print(" Alt");
+    LoRa.print(GPS.altitude, 1);
+    LoRa.endPacket();
+}
+
+// Sends data packets, Splits into 4 different packets to be able to send all of the data
+void sendDataPackets() {
+
+    // D1: BNO055 temp, orientation, gyro, linear accel
+    LoRa.beginPacket();
+    LoRa.print("D1,"); LoRa.print(millis());
+    addI("nt", bno.getTemp());
+    addF("ox", orientationData.orientation.x); addF("oy", orientationData.orientation.y); addF("oz", orientationData.orientation.z);
+    addF("gx", angVelocityData.gyro.x);        addF("gy", angVelocityData.gyro.y);        addF("gz", angVelocityData.gyro.z);
+    addF("lx", linearAccelData.acceleration.x); addF("ly", linearAccelData.acceleration.y); addF("lz", linearAccelData.acceleration.z);
+    LoRa.endPacket();
+
+    // D2: BNO055 mag, accel, gravity + ISM temp
+    LoRa.beginPacket();
+    LoRa.print("D2,"); LoRa.print(millis());
+    addF("mx", magnetometerData.magnetic.x);    addF("my", magnetometerData.magnetic.y);    addF("mz", magnetometerData.magnetic.z);
+    addF("ax", accelerometerData.acceleration.x); addF("ay", accelerometerData.acceleration.y); addF("az", accelerometerData.acceleration.z);
+    addF("vx", gravityData.acceleration.x);     addF("vy", gravityData.acceleration.y);     addF("vz", gravityData.acceleration.z);
+    addF("it", ismTemperatureData.temperature);
+    LoRa.endPacket();
+
+    // D3: ISM accel/gyro, SCD41, BMP390, LTR390
+    LoRa.beginPacket();
+    LoRa.print("D3,"); LoRa.print(millis());
+    addF("iax", ismAccelerometerData.acceleration.x); addF("iay", ismAccelerometerData.acceleration.y); addF("iaz", ismAccelerometerData.acceleration.z);
+    addF("igx", ismGyroData.gyro.x); addF("igy", ismGyroData.gyro.y); addF("igz", ismGyroData.gyro.z);
+    addI("co2", co2Concentration); addF("st", temperature); addF("rh", relativeHumidity);
+    addF("ba", baro.readAltitude(seaLevelPressure)); addF("bp", baro.pressure); addF("bt", baro.temperature);
+    addI("uv", uvs); addI("als", als);
+    LoRa.endPacket();
+
+    // D4: AS7341 + BME688
+    LoRa.beginPacket();
+    LoRa.print("D4,"); LoRa.print(millis());
+    addI("f1", as7341.getChannel(AS7341_CHANNEL_415nm_F1));
+    addI("f2", as7341.getChannel(AS7341_CHANNEL_445nm_F2));
+    addI("f3", as7341.getChannel(AS7341_CHANNEL_480nm_F3));
+    addI("f4", as7341.getChannel(AS7341_CHANNEL_515nm_F4));
+    addI("f5", as7341.getChannel(AS7341_CHANNEL_555nm_F5));
+    addI("f6", as7341.getChannel(AS7341_CHANNEL_590nm_F6));
+    addI("f7", as7341.getChannel(AS7341_CHANNEL_630nm_F7));
+    addI("f8", as7341.getChannel(AS7341_CHANNEL_680nm_F8));
+    addI("cl", as7341.getChannel(AS7341_CHANNEL_CLEAR));
+    addI("nir", as7341.getChannel(AS7341_CHANNEL_NIR));
+    addF("et", bme688.temperature); addF("ep", bme688.pressure / 100.0F);
+    addF("eh", bme688.humidity);    addF("eg", bme688.gas_resistance / 1000.0F);
+    addF("ea", bme688.readAltitude(seaLevelPressure));
+    LoRa.endPacket();
+}
+
 
 // ---- //
 /* Main */
@@ -282,6 +391,25 @@ void setup() {
     led.setBrightness(255);
     led.setPixelColor(0, 255, 255, 255);
     led.show();
+
+    // Setup LoRa transciver 
+    // Currently used for both data and GPS on the same band
+    // Set the previously defined pins
+    LoRa.setPins(ss, rst, dio0);
+
+    // Set frequency to 909 MHz 
+    while (!LoRa.begin(909E6)) {
+        // Internal Check
+        Serial.println("Starting LoRa failed!");
+        delay(500);
+    }
+
+    // Sync word for transmit
+    LoRa.setSyncWord(0xF3);
+    // Error checking
+    LoRa.enableCrc();
+    Serial.println("LoRa Initializing OK!");
+
 }
 
 void loop() {
@@ -493,6 +621,26 @@ void loop() {
     Serial.print(als);
 
     Serial.println();
+
+    // ************************** //
+    // Transceiver (GS ADDITION)
+    //
+    // GPS BUFFER and sending
+    // ************************** //
+    // Getting the sending buffer for payload gps to send over LoRa
+     unsigned long now = millis();
+
+    if (now - lastGpsTx >= GPS_TX_INTERVAL) {
+        lastGpsTx = now;
+        sendGpsPacket();
+    }
+
+    // Data BUFFER and sending 
+    if (now - lastDataTx >= DATA_TX_INTERVAL) {
+        lastDataTx = now;
+        sendDataPackets();
+    }
+
 
     // ----- //
     // Other //
