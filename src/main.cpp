@@ -97,9 +97,12 @@ String errorMsg = ""; // Debug message for why there is an error
 
 // LoRa TX timing 
 const unsigned long GPS_TX_INTERVAL  = 10000;  // 10 s
-const unsigned long DATA_TX_INTERVAL = 60000;  // 60 s
+const unsigned long DATA_TX_INTERVAL = 55000;  // 55 s
+const unsigned long PACKET_GAP       = 250; // Required Packet gap of 250ms
 unsigned long lastGpsTx  = 0;
-unsigned long lastDataTx = 5000; // 5s delay to help gps and data not interfere
+unsigned long lastDataTx = 0;
+unsigned long lastPacketTx = 0;
+uint8_t nextPacket = 0;  
 
 // --------------------- //
 /* Function Declarations */
@@ -206,8 +209,9 @@ void sendGpsPacket() {
 }
 
 // Sends data packets, Splits into 4 different packets to be able to send all of the data
-void sendDataPackets() {
 
+// Send data packet 1
+void sendD1(){
     // D1: BNO055 temp, orientation, gyro, linear accel
     LoRa.beginPacket();
     LoRa.print("D1,"); LoRa.print(millis());
@@ -216,7 +220,10 @@ void sendDataPackets() {
     addF("gx", angVelocityData.gyro.x);        addF("gy", angVelocityData.gyro.y);        addF("gz", angVelocityData.gyro.z);
     addF("lx", linearAccelData.acceleration.x); addF("ly", linearAccelData.acceleration.y); addF("lz", linearAccelData.acceleration.z);
     LoRa.endPacket();
+}
 
+// Send data packet 2
+void sendD2(){
     // D2: BNO055 mag, accel, gravity + ISM temp
     LoRa.beginPacket();
     LoRa.print("D2,"); LoRa.print(millis());
@@ -225,7 +232,10 @@ void sendDataPackets() {
     addF("vx", gravityData.acceleration.x);     addF("vy", gravityData.acceleration.y);     addF("vz", gravityData.acceleration.z);
     addF("it", ismTemperatureData.temperature);
     LoRa.endPacket();
+}
 
+// Send data packet 3
+void sendD3(){
     // D3: ISM accel/gyro, SCD41, BMP390, LTR390
     LoRa.beginPacket();
     LoRa.print("D3,"); LoRa.print(millis());
@@ -235,7 +245,10 @@ void sendDataPackets() {
     addF("ba", baro.readAltitude(seaLevelPressure)); addF("bp", baro.pressure); addF("bt", baro.temperature);
     addI("uv", uvs); addI("als", als);
     LoRa.endPacket();
+}
 
+// Send data packet 4
+void sendD4(){
     // D4: AS7341 + BME688
     LoRa.beginPacket();
     LoRa.print("D4,"); LoRa.print(millis());
@@ -640,9 +653,23 @@ void loop() {
     }
 
     // Data BUFFER and sending 
-    if (now - lastDataTx >= DATA_TX_INTERVAL) {
+
+    if (nextPacket == 0 && now - lastDataTx >= DATA_TX_INTERVAL) {
         lastDataTx = now;
-        sendDataPackets();
+        nextPacket = 1;
+        lastPacketTx = now - PACKET_GAP;   // lets D1 go out immediately
+    }
+
+    // Send the next packet in the burst once the gap has passed
+    if (nextPacket != 0 && now - lastPacketTx >= PACKET_GAP) {
+        lastPacketTx = now;
+        switch (nextPacket) {
+            case 1: sendD1(); break;
+            case 2: sendD2(); break;
+            case 3: sendD3(); break;
+            case 4: sendD4(); Serial.println("Sent D1-D4"); break;
+        }
+        nextPacket = (nextPacket == 4)?  0 : nextPacket + 1;
     }
 
 
