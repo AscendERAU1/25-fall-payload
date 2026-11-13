@@ -180,9 +180,13 @@ void toCharArray(int32_t in) {
 // Transciver Functions
 
 // Appends ",tag:value" to the packet being built
+
+// adds a float to the buffer for sending takes tag of the sensor, the sensor data
 void addF(const char* tag, float v, uint8_t digits = 2) {
     LoRa.print(','); LoRa.print(tag); LoRa.print(':'); LoRa.print(v, digits);
 }
+
+// adds a int to the buffer for sending takes tag of the sensor, the sensor data
 void addI(const char* tag, long v) {
     LoRa.print(','); LoRa.print(tag); LoRa.print(':'); LoRa.print(v);
 }
