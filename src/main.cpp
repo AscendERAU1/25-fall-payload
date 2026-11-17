@@ -93,7 +93,7 @@ String errorMsg = ""; // Debug message for why there is an error
 // Transceiver 
 #define ss 10
 #define rst 5
-#define dio0 2
+#define dio0 9
 
 // LoRa TX timing 
 const unsigned long GPS_TX_INTERVAL  = 10000;  // 10 s
@@ -274,7 +274,7 @@ void sendD4(){
 // ---- //
 
 void setup() {
-    Serial.begin(9600);
+    Serial.begin(115200);
     Serial.setTimeout(0);
     Wire.begin();
 
@@ -415,18 +415,50 @@ void setup() {
     LoRa.setPins(ss, rst, dio0);
 
     // Set frequency to 909 MHz 
-    while (!LoRa.begin(909E6)) {
-        // Internal Check
-        Serial.println("Starting LoRa failed!");
-        delay(500);
+
+    // --------------------- //
+    // LoRa Initialization
+    // --------------------- //
+
+    Serial.println("Starting LoRa initialization...");
+
+    // Configure chip select
+    pinMode(ss, OUTPUT);
+    digitalWrite(ss, HIGH);
+
+    // Reset LoRa module
+    pinMode(rst, OUTPUT);
+    digitalWrite(rst, LOW);
+    delay(10);
+    digitalWrite(rst, HIGH);
+    delay(20);
+
+    // Start STM32 SPI interface
+    SPI.begin();
+
+    // Configure LoRa pins
+    LoRa.setPins(ss, rst, dio0);
+
+    // Lower SPI frequency to 1 MHz
+    LoRa.setSPIFrequency(1000000);
+
+    // Initialize LoRa at 909 MHz
+    if (!LoRa.begin(909E6))
+    {
+        Serial.println("ERROR: LoRa initialization failed!");
+
+        showErrorLed = true;
+        errorMsg += "LoRa initialization failed\n";
     }
-
-    // Sync word for transmit
+    else
+    {
+        // Configure LoRa communication
     LoRa.setSyncWord(0xF3);
-    // Error checking
     LoRa.enableCrc();
-    Serial.println("LoRa Initializing OK!");
+        LoRa.setTxPower(10);
 
+        Serial.println("LoRa initialized successfully!");
+    }
 }
 
 void loop() {
