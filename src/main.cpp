@@ -271,35 +271,6 @@ void sendD4(){
     LoRa.endPacket();
 }
 
-
-// ---------------- //
-/* I2C debug tools  */
-// ---------------- //
-// Comment out the next line to remove all probes (and their serial output).
-#define I2C_DEBUG
-
-#ifdef I2C_DEBUG
-// Reads the BNO055 CHIP_ID register (write reg, repeated start, read) - the same kind of
-// transaction the sensor libraries do. Healthy: err=0 got=1 id=0xA0 in ~0-1 ms.
-void i2cProbe(const char* label) {
-    unsigned long t = millis();
-    Wire.beginTransmission(0x28);
-    Wire.write((uint8_t)0x00);
-    uint8_t err = Wire.endTransmission(false);
-    uint8_t got = Wire.requestFrom((uint8_t)0x28, (uint8_t)1);
-    uint8_t id = got ? Wire.read() : 0;
-    unsigned long d = millis() - t;
-    Serial.print("[probe] "); Serial.print(label);
-    Serial.print(": err="); Serial.print(err);
-    Serial.print(" got="); Serial.print(got);
-    Serial.print(" id=0x"); Serial.print(id, HEX);
-    Serial.print(" "); Serial.print(d); Serial.println("ms");
-}
-#define PROBE(label) i2cProbe(label)
-#else
-#define PROBE(label)
-#endif
-
 // Re-initialises the STM32 I2C peripheral (what un-wedged the bus earlier)
 void i2cReset() { Wire.end(); Wire.begin(); }
 
@@ -314,20 +285,10 @@ void updateSCD41() {
 
     bool ready = false;
     int16_t err = scd41.getDataReadyStatus(ready);
-#ifdef I2C_DEBUG
-    Serial.print("[scd41] dataReady err="); Serial.print(err);
-    Serial.print(" ready="); Serial.println(ready);
-#endif
     if (err == 0 && ready) {
         uint16_t co2;
         float t, rh;
         err = scd41.readMeasurement(co2, t, rh);
-#ifdef I2C_DEBUG
-        Serial.print("[scd41] read err="); Serial.print(err);
-        Serial.print(" co2="); Serial.print(co2);
-        Serial.print(" t="); Serial.print(t);
-        Serial.print(" rh="); Serial.println(rh);
-#endif
         if (err == 0) {
             co2Concentration = co2;
             temperature = t;
@@ -344,18 +305,9 @@ void updateSCD41() {
 void setup() {
     Serial.begin(115200);
     Serial.setTimeout(0);
-#ifdef BENCH_WAIT_FOR_SERIAL
-    // Bench only: give the monitor a few seconds to attach so setup() prints aren't lost.
-    // Remove -D BENCH_WAIT_FOR_SERIAL from platformio.ini for flight.
-    { unsigned long t0 = millis(); while (!Serial && millis() - t0 < 4000) {} }
-#endif
     Wire.begin();
 
     // GPS
-    // while (!GPS.begin(0x10)) {
-    //     showErrorLed = true;
-    //     errorMsg += "There was a problem detecting the GPS\n";
-    // }
     if (!GPS.begin(0x10)) {
         showErrorLed = true;
         errorMsg += "There was a problem detecting the GPS\n";
@@ -376,7 +328,6 @@ void setup() {
     // The reset can leave the STM32 I2C peripheral in a bad state; re-init it for the other sensors
     Wire.end();
     Wire.begin();
-    Serial.println(bnoOk ? "BNO055 OK" : "BNO055 FAILED");
 
     // ISM330DLC
     ismOk = ism330.begin_I2C();
@@ -396,15 +347,11 @@ void setup() {
     scd41.begin(Wire, SCD41_I2C_ADDR_62);
     delay(30);
     scd41.wakeUp();
-    int16_t scdStop  = scd41.stopPeriodicMeasurement();   // includes its own 500 ms wait
-    int16_t scdReinit = scd41.reinit();
+    scd41.stopPeriodicMeasurement();   // includes its own 500 ms wait
+    scd41.reinit();
     uint64_t scdSerial = 0;
     int16_t scdSerialErr = scd41.getSerialNumber(scdSerial);
     int16_t scdStart = scd41.startPeriodicMeasurement();
-    Serial.print("SCD41 init: stop="); Serial.print(scdStop);
-    Serial.print(" reinit="); Serial.print(scdReinit);
-    Serial.print(" serial="); Serial.print(scdSerialErr);
-    Serial.print(" start="); Serial.println(scdStart);
     if (scdSerialErr != 0 || scdStart != 0) {
         showErrorLed = true;
         errorMsg += "There was a problem detecting the SCD41 sensor\n";
@@ -547,8 +494,8 @@ void setup() {
     else
     {
         // Configure LoRa communication
-    LoRa.setSyncWord(0xF3);
-    LoRa.enableCrc();
+        LoRa.setSyncWord(0xF3);
+        LoRa.enableCrc();
         LoRa.setTxPower(10);
 
         Serial.println("LoRa initialized successfully!");
@@ -559,24 +506,13 @@ void loop() {
     // ------------ //
     /* Data Logging */
     // ------------ //
-    PROBE("1 top, before reset");
     i2cReset();
-    PROBE("2 top, after reset");
     updateGPS();
-    PROBE("3 after updateGPS");
 
     if(dataFile){
         toCharArray((long)millis()); dataFile.print(buffer); dataFile.print(", "); // Millis
 
         // GPS data
-        // if(GPS.available()){
-        //    c = GPS.read();
-        //     if (GPS.newNMEAreceived()) {
-        //         if (!GPS.parse(GPS.lastNMEA())) {
-        //         }
-        //     }
-        // }a
-
         toCharArray(GPS.year); dataFile.print(buffer); dataFile.print("-"); // Year
         toCharArray(GPS.month); dataFile.print(buffer); dataFile.print("-"); // Month
         toCharArray(GPS.day); dataFile.print(buffer); dataFile.print(" "); // Day
@@ -610,9 +546,7 @@ void loop() {
         if (bnoOk) bno.getEvent(&magnetometerData, Adafruit_BNO055::VECTOR_MAGNETOMETER);    // - VECTOR_MAGNETOMETER  - uT
         if (bnoOk) bno.getEvent(&accelerometerData, Adafruit_BNO055::VECTOR_ACCELEROMETER);  // - VECTOR_ACCELEROMETER - m/s^2
         if (bnoOk) bno.getEvent(&gravityData, Adafruit_BNO055::VECTOR_GRAVITY);              // - VECTOR_GRAVITY       - m/s^2
-        PROBE("4 after bno reads");
         i2cReset();
-        PROBE("5 after reset following bno");
 
         toCharArray((int)(bnoOk ? bno.getTemp() : 0)); dataFile.print(buffer); dataFile.print(", "); // BNO055_Temperature
         toCharArray(orientationData.orientation.x); dataFile.print(buffer); dataFile.print(", "); // Orientation_X
@@ -654,7 +588,6 @@ void loop() {
 
         // SCD41 Data
         updateSCD41(); // fills co2Concentration / temperature / relativeHumidity when new data is ready
-        PROBE("6 after scd41");
 
         toCharArray(co2Concentration); dataFile.print(buffer); dataFile.print(", "); // CO2_Concentration
         toCharArray(temperature); dataFile.print(buffer); dataFile.print(", "); // SCD41_Temperature
@@ -679,7 +612,6 @@ void loop() {
         toCharArray(baro.readAltitude(seaLevelPressure)); dataFile.print(buffer); dataFile.print(", "); // BMP390_Altitude
         toCharArray(baro.readPressure()); dataFile.print(buffer); dataFile.print(", "); // BMP390_Pressure
         toCharArray(baro.readTemperature()); dataFile.print(buffer); dataFile.print(", "); // BMP390_Temperature
-        PROBE("7 after bmp390");
 
         // LTR390 Data
         currentMillis = millis();
@@ -715,8 +647,7 @@ void loop() {
 
         dataFile.println("");
         dataFile.flush();
-        PROBE("8 after sd flush");
-        } else {
+    } else {
         Serial.println("Error writing to file");
     }
 
@@ -774,7 +705,6 @@ void loop() {
     Serial.print(als);
 
     Serial.println();
-    PROBE("9 after telemetry");
 
     // ************************** //
     // Transceiver (GS ADDITION)
@@ -782,7 +712,7 @@ void loop() {
     // GPS BUFFER and sending
     // ************************** //
     // Getting the sending buffer for payload gps to send over LoRa
-     unsigned long now = millis();
+    unsigned long now = millis();
 
     if (now - lastGpsTx >= GPS_TX_INTERVAL) {
         lastGpsTx = now;
@@ -809,9 +739,6 @@ void loop() {
         nextPacket = (nextPacket == 4)?  0 : nextPacket + 1;
     }
 
-
-    PROBE("10 after lora");
-
     // ----- //
     // Other //
     // ----- //
@@ -831,7 +758,5 @@ void loop() {
 
     led.show();
     ledCurrentlyShowing = !ledCurrentlyShowing;
-    PROBE("11 after led");
     updateGPS();
-    PROBE("12 after final updateGPS");
 }
