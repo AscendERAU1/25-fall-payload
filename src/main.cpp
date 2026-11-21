@@ -54,10 +54,12 @@ char c;
 Adafruit_BNO055 bno;
 sensors_event_t orientationData, angVelocityData, linearAccelData, magnetometerData, accelerometerData, gravityData;
 float x, y, z; // Variables to store the x, y, z values of the sensor data
+bool bnoOk = false; // Set in setup(); loop() skips the BNO055 if init failed
 
 // ISM 330DLC
 Adafruit_ISM330DHCX ism330;
 sensors_event_t ismTemperatureData, ismAccelerometerData, ismGyroData;
+bool ismOk = false;
 
 // SCD41
 SensirionI2cScd4x scd41;
@@ -68,6 +70,7 @@ float relativeHumidity = 0.0;
 
 // AS7341
 Adafruit_AS7341 as7341;
+bool as7341Ok = false; // readAllChannels() blocks forever if the sensor is missing
 
 // BPM390
 Adafruit_BMP3XX baro;
@@ -215,7 +218,7 @@ void sendD1(){
     // D1: BNO055 temp, orientation, gyro, linear accel
     LoRa.beginPacket();
     LoRa.print("D1,"); LoRa.print(millis());
-    addI("nt", bno.getTemp());
+    addI("nt", bnoOk ? bno.getTemp() : 0);
     addF("ox", orientationData.orientation.x); addF("oy", orientationData.orientation.y); addF("oz", orientationData.orientation.z);
     addF("gx", angVelocityData.gyro.x);        addF("gy", angVelocityData.gyro.y);        addF("gz", angVelocityData.gyro.z);
     addF("lx", linearAccelData.acceleration.x); addF("ly", linearAccelData.acceleration.y); addF("lz", linearAccelData.acceleration.z);
@@ -269,6 +272,71 @@ void sendD4(){
 }
 
 
+// ---------------- //
+/* I2C debug tools  */
+// ---------------- //
+// Comment out the next line to remove all probes (and their serial output).
+#define I2C_DEBUG
+
+#ifdef I2C_DEBUG
+// Reads the BNO055 CHIP_ID register (write reg, repeated start, read) - the same kind of
+// transaction the sensor libraries do. Healthy: err=0 got=1 id=0xA0 in ~0-1 ms.
+void i2cProbe(const char* label) {
+    unsigned long t = millis();
+    Wire.beginTransmission(0x28);
+    Wire.write((uint8_t)0x00);
+    uint8_t err = Wire.endTransmission(false);
+    uint8_t got = Wire.requestFrom((uint8_t)0x28, (uint8_t)1);
+    uint8_t id = got ? Wire.read() : 0;
+    unsigned long d = millis() - t;
+    Serial.print("[probe] "); Serial.print(label);
+    Serial.print(": err="); Serial.print(err);
+    Serial.print(" got="); Serial.print(got);
+    Serial.print(" id=0x"); Serial.print(id, HEX);
+    Serial.print(" "); Serial.print(d); Serial.println("ms");
+}
+#define PROBE(label) i2cProbe(label)
+#else
+#define PROBE(label)
+#endif
+
+// Re-initialises the STM32 I2C peripheral (what un-wedged the bus earlier)
+void i2cReset() { Wire.end(); Wire.begin(); }
+
+// SCD41: only read when it says a measurement is ready.
+// readMeasurement() does NOT check this itself. When no new data is ready (it only
+// produces a sample about every 5 s) the sensor NACKs the read, and that NACK wedges the
+// STM32F4 I2C peripheral, so every later I2C call in the pass fails until Wire is re-initialised.
+void updateSCD41() {
+    static unsigned long lastCheck = 0;
+    if (millis() - lastCheck < 1000) return;   // no point polling faster than ~1 Hz
+    lastCheck = millis();
+
+    bool ready = false;
+    int16_t err = scd41.getDataReadyStatus(ready);
+#ifdef I2C_DEBUG
+    Serial.print("[scd41] dataReady err="); Serial.print(err);
+    Serial.print(" ready="); Serial.println(ready);
+#endif
+    if (err == 0 && ready) {
+        uint16_t co2;
+        float t, rh;
+        err = scd41.readMeasurement(co2, t, rh);
+#ifdef I2C_DEBUG
+        Serial.print("[scd41] read err="); Serial.print(err);
+        Serial.print(" co2="); Serial.print(co2);
+        Serial.print(" t="); Serial.print(t);
+        Serial.print(" rh="); Serial.println(rh);
+#endif
+        if (err == 0) {
+            co2Concentration = co2;
+            temperature = t;
+            relativeHumidity = rh;
+        }
+    }
+    if (err != 0) i2cReset();                  // recover the bus if anything went wrong
+}
+
 // ---- //
 /* Main */
 // ---- //
@@ -276,6 +344,11 @@ void sendD4(){
 void setup() {
     Serial.begin(115200);
     Serial.setTimeout(0);
+#ifdef BENCH_WAIT_FOR_SERIAL
+    // Bench only: give the monitor a few seconds to attach so setup() prints aren't lost.
+    // Remove -D BENCH_WAIT_FOR_SERIAL from platformio.ini for flight.
+    { unsigned long t0 = millis(); while (!Serial && millis() - t0 < 4000) {} }
+#endif
     Wire.begin();
 
     // GPS
@@ -294,38 +367,59 @@ void setup() {
     GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
     GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ); // 1 Hz update rate
 
-    // BNO055
-    if (!bno.begin()) {
+    // BNO055 (patched library in lib/: bounded wait + Wire re-init after the reset)
+    bnoOk = bno.begin();
+    if (!bnoOk) {
         showErrorLed = true;
         errorMsg += "There was a problem detecting the BNO055 sensor\n";
     }
+    // The reset can leave the STM32 I2C peripheral in a bad state; re-init it for the other sensors
+    Wire.end();
+    Wire.begin();
+    Serial.println(bnoOk ? "BNO055 OK" : "BNO055 FAILED");
 
     // ISM330DLC
-    if (!ism330.begin_I2C()) {
+    ismOk = ism330.begin_I2C();
+    if (!ismOk) {
         showErrorLed = true;
         errorMsg += "There was a problem detecting the ISM330DLC sensor\n";
+    } else {
+        ism330.configInt1(false, false, true);
+        ism330.configInt2(false, true, false);
     }
-    ism330.configInt1(false, false, true);
-    ism330.configInt2(false, true, false);
 
     // SCD 41
+    // Sensirion's "clean state" start-up sequence. The SCD41 stays powered across an MCU reset,
+    // so it can still be in whatever mode the previous run left it in; start_periodic_measurement
+    // is ignored unless the sensor is idle. (wakeUp() always returns 0, so it can't be used to
+    // detect the sensor - the serial number read below is the real presence check.)
     scd41.begin(Wire, SCD41_I2C_ADDR_62);
-    int scd41good = scd41.wakeUp();
-    if (scd41good != 0) {
+    delay(30);
+    scd41.wakeUp();
+    int16_t scdStop  = scd41.stopPeriodicMeasurement();   // includes its own 500 ms wait
+    int16_t scdReinit = scd41.reinit();
+    uint64_t scdSerial = 0;
+    int16_t scdSerialErr = scd41.getSerialNumber(scdSerial);
+    int16_t scdStart = scd41.startPeriodicMeasurement();
+    Serial.print("SCD41 init: stop="); Serial.print(scdStop);
+    Serial.print(" reinit="); Serial.print(scdReinit);
+    Serial.print(" serial="); Serial.print(scdSerialErr);
+    Serial.print(" start="); Serial.println(scdStart);
+    if (scdSerialErr != 0 || scdStart != 0) {
         showErrorLed = true;
         errorMsg += "There was a problem detecting the SCD41 sensor\n";
     }
-    scd41.startPeriodicMeasurement();
 
     // AS7341
-    if (!as7341.begin()) {
+    as7341Ok = as7341.begin();
+    if (!as7341Ok) {
         showErrorLed = true;
         errorMsg += "There was a problem detecting the AS7341 sensor\n";
+    } else {
+        as7341.setATIME(100);
+        as7341.setASTEP(999);
+        as7341.setGain(AS7341_GAIN_256X);
     }
-
-    as7341.setATIME(100);
-    as7341.setASTEP(999);
-    as7341.setGain(AS7341_GAIN_256X);
 
     // BMP390
     if (!baro.begin_I2C(0x76)) {
@@ -465,7 +559,11 @@ void loop() {
     // ------------ //
     /* Data Logging */
     // ------------ //
-    updateGPS(); 
+    PROBE("1 top, before reset");
+    i2cReset();
+    PROBE("2 top, after reset");
+    updateGPS();
+    PROBE("3 after updateGPS");
 
     if(dataFile){
         toCharArray((long)millis()); dataFile.print(buffer); dataFile.print(", "); // Millis
@@ -506,14 +604,17 @@ void loop() {
         }
 
         // BNO055 Data
-        bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);            // - VECTOR_EULER         - degrees
-        bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);        // - VECTOR_GYROSCOPE     - rad/s
-        bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL);      // - VECTOR_LINEARACCEL   - m/s^2
-        bno.getEvent(&magnetometerData, Adafruit_BNO055::VECTOR_MAGNETOMETER);    // - VECTOR_MAGNETOMETER  - uT
-        bno.getEvent(&accelerometerData, Adafruit_BNO055::VECTOR_ACCELEROMETER);  // - VECTOR_ACCELEROMETER - m/s^2
-        bno.getEvent(&gravityData, Adafruit_BNO055::VECTOR_GRAVITY);              // - VECTOR_GRAVITY       - m/s^2
+        if (bnoOk) bno.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);            // - VECTOR_EULER         - degrees
+        if (bnoOk) bno.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);        // - VECTOR_GYROSCOPE     - rad/s
+        if (bnoOk) bno.getEvent(&linearAccelData, Adafruit_BNO055::VECTOR_LINEARACCEL);      // - VECTOR_LINEARACCEL   - m/s^2
+        if (bnoOk) bno.getEvent(&magnetometerData, Adafruit_BNO055::VECTOR_MAGNETOMETER);    // - VECTOR_MAGNETOMETER  - uT
+        if (bnoOk) bno.getEvent(&accelerometerData, Adafruit_BNO055::VECTOR_ACCELEROMETER);  // - VECTOR_ACCELEROMETER - m/s^2
+        if (bnoOk) bno.getEvent(&gravityData, Adafruit_BNO055::VECTOR_GRAVITY);              // - VECTOR_GRAVITY       - m/s^2
+        PROBE("4 after bno reads");
+        i2cReset();
+        PROBE("5 after reset following bno");
 
-        toCharArray(bno.getTemp()); dataFile.print(buffer); dataFile.print(", "); // BNO055_Temperature
+        toCharArray((int)(bnoOk ? bno.getTemp() : 0)); dataFile.print(buffer); dataFile.print(", "); // BNO055_Temperature
         toCharArray(orientationData.orientation.x); dataFile.print(buffer); dataFile.print(", "); // Orientation_X
         toCharArray(orientationData.orientation.y); dataFile.print(buffer); dataFile.print(", "); // Orientation_Y
         toCharArray(orientationData.orientation.z); dataFile.print(buffer); dataFile.print(", "); // Orientation_Z
@@ -539,7 +640,7 @@ void loop() {
         toCharArray(gravityData.acceleration.z); dataFile.print(buffer); dataFile.print(", "); // Accel_Gravity_Z
 
         // ISM330DLC Data
-        ism330.getEvent(&ismAccelerometerData, &ismGyroData, &ismTemperatureData);
+        if (ismOk) ism330.getEvent(&ismAccelerometerData, &ismGyroData, &ismTemperatureData);
 
         toCharArray(ismTemperatureData.temperature); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Temperature
 
@@ -552,14 +653,15 @@ void loop() {
         toCharArray(ismGyroData.gyro.z); dataFile.print(buffer); dataFile.print(", "); // ISM330DLC_Gyro_Z
 
         // SCD41 Data
-        scd41data = scd41.readMeasurement(co2Concentration, temperature, relativeHumidity);
+        updateSCD41(); // fills co2Concentration / temperature / relativeHumidity when new data is ready
+        PROBE("6 after scd41");
 
         toCharArray(co2Concentration); dataFile.print(buffer); dataFile.print(", "); // CO2_Concentration
         toCharArray(temperature); dataFile.print(buffer); dataFile.print(", "); // SCD41_Temperature
         toCharArray(relativeHumidity); dataFile.print(buffer); dataFile.print(", "); // Relative_Humidity
 
         // AS7341 Data
-        as7341.readAllChannels();
+        if (as7341Ok) as7341.readAllChannels();
 
         toCharArray(as7341.getChannel(AS7341_CHANNEL_415nm_F1)); dataFile.print(buffer); dataFile.print(", "); // 415nm
         toCharArray(as7341.getChannel(AS7341_CHANNEL_445nm_F2)); dataFile.print(buffer); dataFile.print(", "); // 445nm
@@ -577,6 +679,7 @@ void loop() {
         toCharArray(baro.readAltitude(seaLevelPressure)); dataFile.print(buffer); dataFile.print(", "); // BMP390_Altitude
         toCharArray(baro.readPressure()); dataFile.print(buffer); dataFile.print(", "); // BMP390_Pressure
         toCharArray(baro.readTemperature()); dataFile.print(buffer); dataFile.print(", "); // BMP390_Temperature
+        PROBE("7 after bmp390");
 
         // LTR390 Data
         currentMillis = millis();
@@ -612,6 +715,7 @@ void loop() {
 
         dataFile.println("");
         dataFile.flush();
+        PROBE("8 after sd flush");
         } else {
         Serial.println("Error writing to file");
     }
@@ -649,13 +753,13 @@ void loop() {
     Serial.print(linearAccelData.acceleration.z); Serial.print(", ");
 
     // ISM 330DLC
-    ism330.getEvent(&ismAccelerometerData, &ismGyroData, &ismTemperatureData);
+    if (ismOk) ism330.getEvent(&ismAccelerometerData, &ismGyroData, &ismTemperatureData);
     Serial.print(ismAccelerometerData.acceleration.x); Serial.print(", ");
     Serial.print(ismAccelerometerData.acceleration.y); Serial.print(", ");
     Serial.print(ismAccelerometerData.acceleration.z); Serial.print(", ");
 
     // SCD41
-    scd41.readMeasurement(co2Concentration, temperature, relativeHumidity);
+    // (values come from updateSCD41() above - don't read the sensor a second time)
 
     Serial.print(co2Concentration); Serial.print(", ");
     Serial.print(temperature); Serial.print(", ");
@@ -670,6 +774,7 @@ void loop() {
     Serial.print(als);
 
     Serial.println();
+    PROBE("9 after telemetry");
 
     // ************************** //
     // Transceiver (GS ADDITION)
@@ -705,6 +810,8 @@ void loop() {
     }
 
 
+    PROBE("10 after lora");
+
     // ----- //
     // Other //
     // ----- //
@@ -724,5 +831,7 @@ void loop() {
 
     led.show();
     ledCurrentlyShowing = !ledCurrentlyShowing;
+    PROBE("11 after led");
     updateGPS();
+    PROBE("12 after final updateGPS");
 }
